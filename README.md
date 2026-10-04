@@ -4,6 +4,12 @@ A persistent Qwen2.5-VL-7B-Instruct worker for text extraction from vehicle plat
 
 The foreground worker acquires a lifetime lock, loads the model, then reports readiness. Separate CLI processes wait for its socket and reuse the model. Inference is serialized. The container preserves and checks the ROCm PyTorch and torchvision versions supplied by its base image.
 
+## Delivery image
+
+The R03 delivery artifact was assembled by appending one OCI application layer to the immutable prescribed AMD base. All eleven original base layers were preserved. Exact Linux x86_64 dependency wheels are exposed through `PYTHONPATH=/app/vendor`; the base ROCm Torch and torchvision were not replaced. The image downloads the pinned public model at first startup and contains no model weights or challenge fixtures. Its manifest, configuration and all layer availability were checked anonymously.
+
+GPU timing and example-match figures below refer to the R03 source-path pilot. Python imports, full cold start and GPU inference of the final container image were not independently measured. The Dockerfile below is a source build route, separate from the OCI assembly used for delivery. The competition image reference is supplied in the submission form.
+
 ## Build and run on an AMD Linux host
 
 The following build enables first-run download of the pinned public model. Docker build does not download model weights:
