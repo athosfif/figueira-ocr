@@ -1,0 +1,120 @@
+# LOCAL PROPOSAL ONLY. No workflow/repository has been published or dispatched.
+name: Package approved RAG image
+on:
+  workflow_dispatch:
+    inputs:
+      prepared_handoff_sha256:
+        description: Exact JSON SHA256 after successful AMD quality gate and frozen source
+        required: true
+        type: string
+      approved_commit:
+        description: Exact approved 40-character source commit, containing audited CI helpers
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: approved-rag-package
+  cancel-in-progress: false
+jobs:
+  package:
+    # Public repository is a required gate below. No larger/GPU/private runner.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: rag-publication
+    env:
+      GOMAXPROCS: '2'
+      GOTOOLCHAIN: local
+      GOPROXY: https://proxy.golang.org
+      GOSUMDB: sum.golang.org
+      RAG_IMAGE_REF: ${{ secrets.RAG_IMAGE_REF }}
+      DOCKER_CONFIG: ${{ runner.temp }}/figueira-rag-docker-auth
+      CI_STAGE: ${{ runner.temp }}/figueira-rag-stage
+      CI_EVIDENCE: ${{ runner.temp }}/figueira-rag-evidence
+      CI_SOURCE_DIR: rag-mc3
+    steps:
+      - name: Verify explicit scope and public standard runner
+        env:
+          IS_PRIVATE: ${{ github.event.repository.private }}
+          APPROVED_COMMIT: ${{ inputs.approved_commit }}
+          HANDOFF_SHA: ${{ inputs.prepared_handoff_sha256 }}
+        run: |
+          set -euo pipefail
+          test "$IS_PRIVATE" = false
+          [[ "$APPROVED_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$HANDOFF_SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$RAG_IMAGE_REF" == "athosfif/"* && "$RAG_IMAGE_REF" != *'@'* && "$RAG_IMAGE_REF" != *' '* ]]
+          echo "::add-mask::$RAG_IMAGE_REF"
+          echo "::add-mask::${RAG_IMAGE_REF%:*}"
+          echo "::add-mask::${RAG_IMAGE_REF#*/}"
+          mkdir -m 700 "$DOCKER_CONFIG"
+          df -h "$RUNNER_TEMP"
+          python3 -c 'import shutil,os; assert shutil.disk_usage(os.environ["RUNNER_TEMP"]).free >= 4*1024**3'
+      - name: Checkout exactly the approved source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # official v4 ref verified read-only 2026-10-05
+        with:
+          ref: ${{ inputs.approved_commit }}
+          persist-credentials: false
+      - name: Check committed small AMD JSON and replay audited official wheels
+        env:
+          HANDOFF_SHA: ${{ inputs.prepared_handoff_sha256 }}
+        run: |
+          set -euo pipefail
+          python3 "$CI_SOURCE_DIR/ci/rebuild_stage.py" --handoff "$CI_SOURCE_DIR/evidence/AMD-HANDOFF.json" --sha256 "$HANDOFF_SHA" --root "$CI_SOURCE_DIR" --stage "$CI_STAGE"
+          python3 "$CI_SOURCE_DIR/ci/stream_hf_layer.py" --stage "$CI_STAGE"
+      - name: Compile only the OCI helper, with official module integrity checks
+        run: |
+          set -euo pipefail
+          python3 "$CI_SOURCE_DIR/scripts/prepare_remote_go.py" --install --directory /tmp/figueira-ci-go-1.27.1
+          cd "$CI_SOURCE_DIR/scripts/oci-assembler"
+          /tmp/figueira-ci-go-1.27.1/go/bin/go version
+          /tmp/figueira-ci-go-1.27.1/go/bin/go mod verify
+          /tmp/figueira-ci-go-1.27.1/go/bin/go build -p 2 -o "$RUNNER_TEMP/rag-assembler" .
+      - name: Authorize this runner through ordinary Docker Hub device login
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          # The owner must approve the displayed one-time code in an already
+          # authenticated Docker Hub browser as athosfif. No PAT/config transfer.
+          # No debug tracing; fallback username/password prompts must not be used.
+          timeout 540 script -q -e -c 'docker login' /dev/null </dev/null
+      - name: Stream the pinned HF model and publish the approved image
+        run: |
+          set -euo pipefail
+          mkdir -p "$CI_EVIDENCE"
+          if ! "$RUNNER_TEMP/rag-assembler" \
+            rocm/pytorch@sha256:3174cb7061d94c427da96c0edef4adea28046fa3f3b2ff3948dc4e995665ff8c \
+            "$GITHUB_WORKSPACE/$CI_SOURCE_DIR/ci/stream_hf_layer.py" "$CI_STAGE" "$RAG_IMAGE_REF" "$CI_EVIDENCE" \
+            2026-10-05T00:00:00Z --push >"$CI_EVIDENCE/assembly-private.log" 2>&1; then
+            # Raw URLs can contain a repository path rather than the complete
+            # masked tag. Keep raw diagnostics private; print bounded redaction.
+            python3 - "$CI_EVIDENCE/assembly-private.log" <<'PY'
+          import os,sys,urllib.parse
+          ref=os.environ['RAG_IMAGE_REF']; repo=ref.rsplit(':',1)[0]
+          tokens={ref,repo,repo.split('/',1)[-1]}
+          tokens|={urllib.parse.quote(t,safe='') for t in list(tokens)}
+          tokens|={urllib.parse.quote_plus(t) for t in list(tokens)}
+          for line in open(sys.argv[1]).read()[-10000:].splitlines():
+              for token in sorted(tokens,key=len,reverse=True):line=line.replace(token,'<private-image>')
+              print('[OCI diagnostic] '+line)
+          PY
+            exit 1
+          fi
+          # Docker Hub same-registry mount preserves all original layers and
+          # forbids transferring the large base to this runner or the Mac.
+          python3 - "$CI_EVIDENCE/OCI-ASSEMBLY-RECEIPT.json" <<'PY'
+          import json,sys
+          receipt=json.load(open(sys.argv[1]))
+          assert receipt['push_verified'] is True
+          assert receipt['anonymous_manifest_config_verified'] is True
+          assert receipt['total_uncompressed_bytes'] <= 60*1024**3
+          print('Publication digest:', receipt['manifest_digest'])
+          print('Anonymous manifest/config verified; final GPU container execution is not verified.')
+          PY
+      - name: End only this runner's temporary login
+        if: always()
+        run: |
+          set +e
+          docker logout >/dev/null 2>&1
+          rm -rf -- "$DOCKER_CONFIG"
+          # No cache/artifact upload: model/base bytes and auth never persist.
