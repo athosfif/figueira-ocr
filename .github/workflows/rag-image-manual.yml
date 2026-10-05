@@ -28,9 +28,6 @@ jobs:
       GOPROXY: https://proxy.golang.org
       GOSUMDB: sum.golang.org
       RAG_IMAGE_REF: ${{ secrets.RAG_IMAGE_REF }}
-      DOCKER_CONFIG: ${{ runner.temp }}/figueira-rag-docker-auth
-      CI_STAGE: ${{ runner.temp }}/figueira-rag-stage
-      CI_EVIDENCE: ${{ runner.temp }}/figueira-rag-evidence
       CI_SOURCE_DIR: rag-mc3
     steps:
       - name: Verify explicit scope and public standard runner
@@ -40,6 +37,10 @@ jobs:
           HANDOFF_SHA: ${{ inputs.prepared_handoff_sha256 }}
         run: |
           set -euo pipefail
+          export DOCKER_CONFIG="$RUNNER_TEMP/figueira-rag-docker-auth"
+          export CI_STAGE="$RUNNER_TEMP/figueira-rag-stage"
+          export CI_EVIDENCE="$RUNNER_TEMP/figueira-rag-evidence"
+          printf '%s\n' "DOCKER_CONFIG=$DOCKER_CONFIG" "CI_STAGE=$CI_STAGE" "CI_EVIDENCE=$CI_EVIDENCE" >> "$GITHUB_ENV"
           test "$IS_PRIVATE" = false
           [[ "$APPROVED_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           [[ "$HANDOFF_SHA" =~ ^[0-9a-f]{64}$ ]]
